@@ -2,26 +2,35 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const types = [
-    vscode.window.createTextEditorDecorationType({
+enum Annotation {
+	todo = '0',
+	done = '1',
+	na = '2',
+	obsolete = '3',
+}
+
+const types: Record<Annotation, vscode.TextEditorDecorationType>  = {
+    [Annotation.todo]: vscode.window.createTextEditorDecorationType({
         backgroundColor: 'black',
         isWholeLine: true,
     }),
-    vscode.window.createTextEditorDecorationType({
+    [Annotation.done]: vscode.window.createTextEditorDecorationType({
         border: 'solid rgba(0, 200, 0, 0.5)',
         borderWidth: '0 0 0 3px',
         isWholeLine: true,
     }),
-    vscode.window.createTextEditorDecorationType({
+    [Annotation.na]: vscode.window.createTextEditorDecorationType({
         border: 'solid rgba(210, 210, 210, 0.5)',
         borderWidth: '0 0 0 3px',
         isWholeLine: true,
     }),
-    vscode.window.createTextEditorDecorationType({
+    [Annotation.obsolete]: vscode.window.createTextEditorDecorationType({
         border: 'solid rgba(255, 0, 0, 0.5)',
         borderWidth: '0 0 0 3px',
 	}),
-];
+};
+
+
 
 type Storage = Record<string, Record<number, number>>;
 
@@ -71,16 +80,16 @@ export class Annotator {
 
     initialize(context: vscode.ExtensionContext) {
         context.subscriptions.push(
-            vscode.commands.registerCommand('code-annotator.clear', () => this.annotate(0))
+            vscode.commands.registerCommand('code-annotator.clear', () => this.annotate(Annotation.todo))
         );
         context.subscriptions.push(
-            vscode.commands.registerCommand('code-annotator.done', () => this.annotate(1))
+            vscode.commands.registerCommand('code-annotator.done', () => this.annotate(Annotation.done))
         );
         context.subscriptions.push(
-            vscode.commands.registerCommand('code-annotator.na', () => this.annotate(2))
+            vscode.commands.registerCommand('code-annotator.na', () => this.annotate(Annotation.na))
         );
         context.subscriptions.push(
-            vscode.commands.registerCommand('code-annotator.obsolete', () => this.annotate(3))
+            vscode.commands.registerCommand('code-annotator.obsolete', () => this.annotate(Annotation.obsolete))
         );
     
         vscode.window.onDidChangeActiveTextEditor(
@@ -105,17 +114,17 @@ export class Annotator {
 
         const contents = fs.readFileSync(outputFile, 'utf-8');
 
-        const expectedContents = contents.replace(/\d$/gm, '');
+        const expectedContents = contents.replace(/^\d( |$)/gm, '');
 
         if (expectedContents !== fs.readFileSync(editor.document.uri.fsPath, 'utf-8')) {
-            console.log('contents not same');
+            console.log('contents not same', expectedContents, fs.readFileSync(editor.document.uri.fsPath, 'utf-8'));
             return undefined;
         }
 
         return contents;
     }
 
-    loadAnnotationsForEditor(editor?: vscode.TextEditor): number[] | undefined {
+    loadAnnotationsForEditor(editor?: vscode.TextEditor): Annotation[] | undefined {
         if (!editor) {
             return;
         }
@@ -132,12 +141,10 @@ export class Annotator {
             return;
         }
 
-        const annotations = file.match(/\d$/mg);
-
-        return annotations?.map(number => Number(number));
+        return file.match(/^\d/mg) as Annotation[] | undefined;
     }
 
-    async annotate(type: number) {
+    async annotate(type: Annotation) {
         const editor = vscode.window.activeTextEditor;
 
         if (!editor) {
@@ -151,15 +158,14 @@ export class Annotator {
         }
 
         
-        const lines = file.split(/(\r?\n)/);
+        const lines = strToLines(file);
 
         const {selections} = editor;
         const isSingleLineSelected = selections.length === 1 && selections[0].start.line === selections[0].end.line;
 
         for (const selection of selections) {
             for (let i = selection.start.line; i <= selection.end.line; i++) {
-                const lineNumber = i * 2;
-                lines[lineNumber] = lines[lineNumber].replace(/\d?$/, String(type));
+                lines[i] = lines[i].replace(/^\d/, type);
             }
         }
 
@@ -174,14 +180,16 @@ export class Annotator {
         fs.writeFileSync(this.getOutputPathForEditor(editor), newFile);
     }
 
-    showAnnotations(editor?: vscode.TextEditor, annotations?: number[]) {
+    showAnnotations(editor?: vscode.TextEditor, annotations?: Annotation[]) {
         if (!editor || !annotations) {
             return;
         }
 
         const decorations = createRanges(annotations);
-        for (let i = 1; i < 4; i++) {
-            editor.setDecorations(types[i], decorations[i] || []);
+        for (const type of Object.values(Annotation)) {
+            if (type !== Annotation.todo) {
+                editor.setDecorations(types[type], decorations[type] || []);
+            }
         }
     }
 
@@ -190,11 +198,28 @@ export class Annotator {
     }
 }
 
-function createRanges(annotations: number[]) {
+function strToLines(str: string) {
+	const parts = str.split(/(\r\n|\r|\n)/);
+
+	// join every two parts
+	const lines = [];
+	for (let i = 0; i < parts.length; i += 2) {
+		lines.push(`${parts[i]}${parts[i + 1] || ''}`);
+	}
+
+	return lines;
+}
+
+function createRanges(annotations: Annotation[]) {
     let start = -1;
     let end = -1;
-    let type = -1;
-    const decorations: vscode.Range[][] = [];
+    let type = Annotation.todo;
+    const decorations: Record<Annotation, vscode.Range[]> = {
+        [Annotation.todo] : [],
+        [Annotation.done] : [],
+        [Annotation.na] : [],
+        [Annotation.obsolete] : [],
+    };
 
     for (const [line, currentType] of annotations.entries()) {
         const lineNo = Number(line);
@@ -205,9 +230,6 @@ function createRanges(annotations: number[]) {
         }
 
         if (lineNo > end + 1 || type !== currentType) {
-            if (!decorations[type]) {
-                decorations[type] = [];
-            }
             decorations[type].push(new vscode.Range(start, 0, end, 0));
 
             start = end = lineNo;
