@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as glob from 'glob';
 
 const types = [
     vscode.window.createTextEditorDecorationType({
@@ -30,8 +29,9 @@ const pattern = 'todo';
 
 export class Annotator {
     readonly workspacePath: string;
+    readonly outputPath: string = '';
 
-    constructor(_context: vscode.ExtensionContext) {
+    constructor(context: vscode.ExtensionContext) {
         const folder = vscode.workspace.workspaceFolders?.[0];
 
         if (!folder) {
@@ -41,23 +41,100 @@ export class Annotator {
 
         this.workspacePath = folder.uri.fsPath;
 
-        if (!fs.existsSync(this.getStoragePath())) {
-            this.storeData({});
+        try {
+            this.outputPath = this.loadConfig();
+        } catch (e) {
+            vscode.window.showInformationMessage(`Failed to initialize: ${e}`);
+            return;
         }
+
+        this.initialize(context);
 
         this.loadDataForEditor(vscode.window.activeTextEditor);
     }
 
+    loadConfig() {
+        const configFile = path.join(this.workspacePath, 'rewrite.json');
+        if (!fs.existsSync(configFile)) {
+            throw new Error("Config file 'rewrite.json' does not exist: " + configFile);
+        }
+
+        const config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+        const rewriteDir = config?.rewriteDir;
+
+        if (typeof rewriteDir !== 'string') {
+            throw new Error("Config does not containt 'rewriteDir'");
+        }
+
+        return path.join(this.workspacePath, rewriteDir);
+    }
+
+    initialize(context: vscode.ExtensionContext) {
+        context.subscriptions.push(
+            vscode.commands.registerCommand('code-annotator.clear', () => this.annotate(0))
+        );
+        context.subscriptions.push(
+            vscode.commands.registerCommand('code-annotator.done', () => this.annotate(1))
+        );
+        context.subscriptions.push(
+            vscode.commands.registerCommand('code-annotator.na', () => this.annotate(2))
+        );
+        context.subscriptions.push(
+            vscode.commands.registerCommand('code-annotator.obsolete', () => this.annotate(3))
+        );
+    
+        vscode.window.onDidChangeActiveTextEditor(
+            (editor) => this.loadDataForEditor(editor),
+            null,
+            context.subscriptions
+          );
+    }
+
     loadDataForEditor(editor?: vscode.TextEditor) {
+        const annotations = this.loadAnnotationsForEditor(editor);
+
+        this.showAnnotations(editor, annotations);
+    }
+
+    loadFileForEditor(editor: vscode.TextEditor) {
+        const outputFile = this.getOutputPathForEditor(editor);
+        
+        if (!fs.existsSync(outputFile)) {
+            return;
+        }
+
+        const contents = fs.readFileSync(outputFile, 'utf-8');
+
+        const expectedContents = contents.replace(/\d$/gm, '');
+
+        if (expectedContents !== fs.readFileSync(editor.document.uri.fsPath, 'utf-8')) {
+            console.log('contents not same');
+            return undefined;
+        }
+
+        return contents;
+    }
+
+    loadAnnotationsForEditor(editor?: vscode.TextEditor): number[] | undefined {
         if (!editor) {
             return;
         }
 
-        const allData = this.loadFullData();
-        const file = path.relative(this.workspacePath, editor.document.uri.fsPath).split(path.sep).join(path.posix.sep);
-        const selectedLines = allData[file] || {};
+        return this.getAnnotationsFromFile(this.loadFileForEditor(editor));
+    }
 
-        this.showAnnotations(editor, selectedLines);
+    getOutputPathForEditor(editor: vscode.TextEditor) {
+        return path.join(this.outputPath, path.relative(this.workspacePath, editor.document.uri.fsPath));
+    }
+
+    getAnnotationsFromFile(file?: string) {
+        if (!file) {
+            return;
+        }
+
+        const annotations = file.match(/\d$/mg);
+
+        return annotations?.map(number => Number(number));
     }
 
     async annotate(type: number) {
@@ -67,124 +144,59 @@ export class Annotator {
             return;
         }
 
-        const allData = this.loadFullData();
-        const file = path.relative(this.workspacePath, editor.document.uri.fsPath).split(path.sep).join(path.posix.sep);
-        const selectedLines = allData[file] || {};
+        const file = this.loadFileForEditor(editor);
+
+        if (!file) {
+            return;
+        }
+
+        
+        const lines = file.split(/(\r?\n)/);
 
         const {selections} = editor;
         const isSingleLineSelected = selections.length === 1 && selections[0].start.line === selections[0].end.line;
 
         for (const selection of selections) {
             for (let i = selection.start.line; i <= selection.end.line; i++) {
-                if (type === 0) {
-                    delete selectedLines[i];
-                } else {
-                    selectedLines[i] = type;
-                }
+                const lineNumber = i * 2;
+                lines[lineNumber] = lines[lineNumber].replace(/\d?$/, String(type));
             }
         }
 
-        this.showAnnotations(editor, selectedLines);
+        const newFile = lines.join('');
+
+        this.showAnnotations(editor, this.getAnnotationsFromFile(newFile));
 
         if (isSingleLineSelected) {
             vscode.commands.executeCommand("cursorMove", { to: "down", by:'wrappedLine', value: 1});
         }
-        this.storeData({
-            ...allData,
-            [file]: selectedLines,
-        });
+
+        fs.writeFileSync(this.getOutputPathForEditor(editor), newFile);
     }
 
-    async showStats() {
-        const data = this.loadFullData();
-
-        const stats = [0, 0, 0, 0];
-
-        const files = await this.getMatchingFiles();
-        await Promise.all(files.map(async (file) => {
-            const lines = await this.getLineCount(file);
-            const fileStat = data[file] || {};
-            for (let i = 0; i < lines; i++) {
-                stats[fileStat[i] || 0]++;
-            }
-        }));
-
-
-
-        const sum = stats.reduce((prev, curr) => prev + curr, 0);
-
-        function getStat(value: number) {
-            return `${value} (${Math.round(value / sum * 1000)/10}%)`;
+    showAnnotations(editor?: vscode.TextEditor, annotations?: number[]) {
+        if (!editor || !annotations) {
+            return;
         }
 
-        const message = `Done: ${getStat(stats[1])}\nNot applicable: ${getStat(stats[2])}\nObsolete: ${getStat(stats[3])}\nTodo: ${getStat(stats[0])}`;
-        vscode.window.showInformationMessage(message, {modal: true});
-
-        console.log({
-            done: getStat(stats[1]),
-            na: getStat(stats[2]),
-            obsolete: getStat(stats[3]),
-            todo: getStat(stats[0]),
-        });
-    }
-
-    showAnnotations(editor: vscode.TextEditor, selectedLines: Record<number, number>) {
-        const decorations = createRanges(selectedLines);
+        const decorations = createRanges(annotations);
         for (let i = 1; i < 4; i++) {
             editor.setDecorations(types[i], decorations[i] || []);
         }
     }
 
-    loadFullData(): Storage {
-        return JSON.parse(fs.readFileSync(this.getStoragePath(), "utf-8"));
-    }
-
-    storeData(data: Storage) {
-        fs.writeFileSync(this.getStoragePath(), JSON.stringify(data, null, '  '));
-    }
-
     getStoragePath() {
         return path.join(this.workspacePath, 'rewrite.json');
     }
-
-    getMatchingFiles(): Promise<string[]> {
-        return new Promise((resolve, reject) => {
-            glob(pattern, {cwd: this.workspacePath}, function(err, files) {
-                if (err) {
-                    return reject(err);
-                }
-
-                resolve(files);
-            });
-        });
-    }
-
-    getLineCount(filePath: string): Promise<number> {
-        return new Promise(resolve => {
-            let count = 0;
-
-            fs.createReadStream(path.join(this.workspacePath, filePath))
-                .on('data', function(chunk) {
-                    for (let i=0; i < chunk.length; ++i) {
-                        if (chunk[i] === 10) {
-                            count++;
-                        }
-                    }
-                })
-                .on('end', function() {
-                    resolve(count);
-                });
-        });
-    }
 }
 
-function createRanges(selectedLines: Record<number, number>) {
+function createRanges(annotations: number[]) {
     let start = -1;
     let end = -1;
     let type = -1;
     const decorations: vscode.Range[][] = [];
 
-    for (const [line, currentType] of Object.entries(selectedLines)) {
+    for (const [line, currentType] of annotations.entries()) {
         const lineNo = Number(line);
         if (start === -1) {
             start = end = lineNo;
@@ -192,7 +204,6 @@ function createRanges(selectedLines: Record<number, number>) {
             continue;
         }
 
-        console.log(start, end, line);
         if (lineNo > end + 1 || type !== currentType) {
             if (!decorations[type]) {
                 decorations[type] = [];

@@ -1,7 +1,7 @@
 {
 	"name": "code-annotator",
-	"displayName": "code-annotator",
-	"description": "",
+	"displayName": "Code rewrite annotator",
+	"description": "Annotate files based on rewrite status",
 	"version": "0.0.1",
 	"engines": {
 		"vscode": "^1.68.0"
@@ -10,8 +10,14 @@
 		"Other"
 	],
 	"activationEvents": [
-		"*"
+		"workspaceContains:rewrite.json"
 	],
+	"author": "Timmu (https://github.com/timukasr)",
+	"publisher": "Timmu",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/timukasr/code-annotator"
+	},
 	"main": "./out/extension.js",
 	"contributes": {
 		"commands": [
@@ -70,6 +76,7 @@
 	],
 	"scripts": {
 		"vscode:prepublish": "yarn run compile",
+		"build": "vsce package --out out/code-annotator.vsix",
 		"compile": "tsc -p ./",
 		"watch": "tsc -watch -p ./",
 		"pretest": "yarn run compile && yarn run lint",
